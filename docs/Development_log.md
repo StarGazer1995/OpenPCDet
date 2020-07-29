@@ -12,18 +12,4 @@
 ​					There are serious of **problems**, **what is the meaning of MLP**? It is obvious that the **MLP is for**
 ​					**grouping in multiple scale**, but **how** it works in multi-resolution? An intuition thought is that the **MLP **
 ​					**is used for linking the different levels**. But **which points** should be linked? A ball query would be
-​					proposed. But the ball radius need to be decided.
-
-​	File Changes:
-
-​					create:
-
-​						[Development_log.md](./Development_log.md)
-
-​						[PVNet.yaml](../tools/cfgs/kitti_models/PVNET.yaml) #Tuning the network
-
-​						[voxel_set_abstraction_MRG.py](../models/backbones_3d/pfe/voxel_set_abstraction_MRG.py) #for implement MRG
-
-​					modified:
-
-​						[pointnet2_modules.py](../ops/pointnet2/pointnet2_stack/pointnet2_modules.py) #Implement StackSAModuleMRG Class											
+​					proposed. But the ball radius need to be decided.								

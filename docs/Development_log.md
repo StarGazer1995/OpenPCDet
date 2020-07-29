@@ -14,3 +14,12 @@
 ​					**is used for linking the different levels**. But **which points** should be linked? A ball query would be
 ​					proposed. But the ball radius need to be decided.
 
+​	File Changes:
+​					create:
+​						[Development_log.md](./Development_log.md)
+​						[PVNet.yaml](../tools/cfgs/kitti_models) #Tuning the network
+​						[voxel_set_abstraction_MRG.py](https://github.com/StarGazer1995/OpenPCDet/blob/master/pcdet/models/backbones_3d/pfe/voxel_set_abstraction_MRG.py) #for implement MRG
+
+
+​					modified:
+​						[pointnet2_modules.py](../ops/pointnet2/pointnet2_stack/pointnet2_modules.py) #Implement StackSAModuleMRG Class											

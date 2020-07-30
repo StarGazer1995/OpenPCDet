@@ -20,6 +20,13 @@
 ​						[PVNet.yaml](../tools/cfgs/kitti_models) #Tuning the network
 ​						[voxel_set_abstraction_MRG.py](https://github.com/StarGazer1995/OpenPCDet/blob/master/pcdet/models/backbones_3d/pfe/voxel_set_abstraction_MRG.py) #for implement MRG
 
-
 ​					modified:
-​						[pointnet2_modules.py](../ops/pointnet2/pointnet2_stack/pointnet2_modules.py) #Implement StackSAModuleMRG Class											
+​						[pointnet2_modules.py](../ops/pointnet2/pointnet2_stack/pointnet2_modules.py) #Implement StackSAModuleMRG Class			
+
+## 30.Jul	Giving up to implement the MRG
+
+Due to the performance of the MRG is not overshadow of the MSG, and time cost of implementation is too high, we decided to give up.
+
+Now, we are turning to the RandLA-Net for help.
+
+May the true idol of Shang Hai guide us.								

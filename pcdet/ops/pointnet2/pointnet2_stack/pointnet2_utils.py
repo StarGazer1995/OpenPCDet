@@ -20,7 +20,6 @@ class BallQuery(Function):
             xyz_batch_cnt: (batch_size), [N1, N2, ...]
             new_xyz: (M1 + M2 ..., 3) centers of the ball query
             new_xyz_batch_cnt: (batch_size), [M1, M2, ...]
-
         Returns:
             idx: (M1 + M2, nsample) tensor with the indicies of the features that form the query balls
         """
@@ -33,7 +32,7 @@ class BallQuery(Function):
         M = new_xyz.shape[0]
         idx = torch.cuda.IntTensor(M, nsample).zero_()
 
-        pointnet2.ball_query_wrapper(B, M, radius, nsample, new_xyz, new_xyz_batch_cnt, xyz, xyz_batch_cnt, idx)
+        pointnet2.ball_query_wrapper(B, M, radius, nsample, new_xyz, new_xyz_batch_cnt, xyz, xyz_batch_cnt, idx)    #output idx:[M,nsample]
         empty_ball_mask = (idx[:, 0] == -1)
         idx[empty_ball_mask] = 0
         return idx, empty_ball_mask

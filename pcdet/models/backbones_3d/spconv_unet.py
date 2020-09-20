@@ -175,7 +175,7 @@ class UNetV2(nn.Module):
             batch_size=batch_size
         )
         x = self.conv_input(input_sp_tensor)
-
+        
         x_conv1 = self.conv1(x)
         x_conv2 = self.conv2(x_conv1)
         x_conv3 = self.conv3(x_conv2)

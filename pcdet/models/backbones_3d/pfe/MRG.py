@@ -1,3 +1,4 @@
+from pcdet.ops.pointnet2.pointnet2_stack.pointnet2_utils import BallQuery
 import torch
 import torch.nn as nn
 from ....utils import common_utils
@@ -163,6 +164,30 @@ class VoxelSetAbstractionMRG(nn.Module):
         keypoints = torch.cat(keypoints_list, dim=0)  # (B, M, 3)
         return keypoints
 
+    def getPoint(self, batch_dict, layer):
+        batch_size = batch_dict['batch_size']
+        if 'raw_point'==layer:
+            xyz = batch_dict['points'][:, 1:4]
+            xyz_batch_cnt = xyz.new_zeros(batch_size).int()
+            batch_indices = batch_dict['points'][:, 0].long()
+            for bs_idx in range(batch_size):
+                xyz_batch_cnt[bs_idx] = (batch_indices[:, 0] == bs_idx).sum()
+        elif 'x_conv' in layer:
+            coords = batch_dict['multi_scale_3d_features'][layer].indices
+            xyz = common_utils.get_voxel_centers(
+                coords[:, 1:4],
+                downsample_times=self.downsample_times_map[layer],
+                voxel_size=self.voxel_size,
+                point_cloud_range=self.point_cloud_range
+            )
+            xyz_batch_cnt = xyz.new_zeros(batch_size).int()
+            for bs_idx in range(batch_size):
+                xyz_batch_cnt[bs_idx] = (coords[:, 0] == bs_idx).sum()
+        else:
+            raise NotImplementedError
+        
+        return xyz, xyz_batch_cnt
+
     def forward(self, batch_dict):
         """
         Args:
@@ -171,21 +196,50 @@ class VoxelSetAbstractionMRG(nn.Module):
                 keypoints: (B, num_keypoints, 3)
                 multi_scale_3d_features: {
                         'x_conv4': ...
+                        'x_conv3': ...
+                        'x_conv2': ...
+                        'x_conv1': ...
                     }
                 points: optional (N, 1 + 3 + C) [bs_idx, x, y, z, ...]
                 spatial_features: optional
                 spatial_features_stride: optional
 
         Returns:
+            tree:(list) (5,batch_size) [conv1, conv2, conv3, conv4, raw_points]
+            conv1 ()
             point_features: (N, C)
             point_coords: (N, 4)
 
         """
         multi_scale_3d_features = batch_dict['multi_scale_3d_features']
-        keypoints = tensor.tensor([])
+        batch_size = batch_dict['batch_size']
+        radius = self.model_cfg.RADIUS # 需要在cfg中给定, [conv4->conv3, conv3->conv2, conv2->conv1, conv1->raw]
+        nsample = self.model_cfg.NSAMPLE # 需要在cfg中给定, [conv4->conv3, conv3->conv2, conv2->conv1, conv1->raw]
+        layers = self.model_cfg.FEATURES_SOURCE # layers = ['conv4', 'conv3', 'conv2', 'conv1', 'raw_points']
+        ballQuery = BallQuery.apply()
+        src_name = layers.pop(0)
+        xyz, xyz_batch_cnt = self.getPoint(batch_dict, src_name)
+        new_xyz, new_xyz_batch_cnt = self.getPoint(batch_dict, src_name)
+        tree = [xyz]
+        idx_shape = [xyz.size(0)]
+
+        for k, src_name in enumerate(layers):
+            new_xyz, new_xyz_batch_cnt = self.getPoint(batch_dict, src_name)
+            idx = torch.cuda.IntTensor(xyz.size(0), nsample[k]).zero_()
+            ballQuery(radius[k], nsample[k], new_xyz, new_xyz_batch_cnt, xyz, xyz_batch_cnt, idx)
+            idx_shape.append(nsample[k])
+            tree.append(idx.view(*idx_shape))
+            xyz = new_xyz[idx.view(-1,), :]
+            xyz_batch_cnt = new_xyz[idx.view(-1,)]
+
+        batch_dict['tree'] = tree
+
+        
+        keypoints = torch.tensor([])
         point_features_list = []
         keys = ['raw_keypoint','x_conv1','x_conv2','x_conv3','x_conv4','bev']
         pooled_point = []; pooled_features = []
+        '''
         for slow in range(len(self.model_cfg.FEATURES_SOURCE)-1):
             fast = slow +1
             if self.model_cfg.FEATURES_SOURCE[slow] == 'raw_points':
@@ -203,11 +257,11 @@ class VoxelSetAbstractionMRG(nn.Module):
                 pooled_points, pooled_features = self.SA_rawpoints(
                     xyz = xyz.contiguous(),
                     xyz_batch_cnt = xyz_batch_cnt,
-                    new_xyz =
+                    new_xyz = None
                 )
             if self.model_cfg.FEATURES_SOURCE[fast] == 'bev':
-
-
+                pass
+        '''
         batch_idx = torch.arange(batch_size, device=keypoints.device).view(-1, 1).repeat(1, keypoints.shape[1]).view(-1)
         point_coords = torch.cat((batch_idx.view(-1, 1).float(), keypoints.view(-1, 3)), dim=1)
 

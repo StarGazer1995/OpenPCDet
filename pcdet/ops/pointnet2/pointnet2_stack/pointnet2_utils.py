@@ -34,7 +34,7 @@ class BallQuery(Function):
         idx = torch.cuda.IntTensor(M, nsample).zero_()
 
         pointnet2.ball_query_wrapper(B, M, radius, nsample, new_xyz, new_xyz_batch_cnt, xyz, xyz_batch_cnt, idx)
-        empty_ball_mask = (idx[:, 0] == -1)
+        empty_ball_mask = (idx[:, 0] == -1) #记录空的ball，无neighbors
         idx[empty_ball_mask] = 0
         return idx, empty_ball_mask
 

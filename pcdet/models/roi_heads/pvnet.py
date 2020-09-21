@@ -2,9 +2,10 @@ import torch.nn as nn
 from .roi_head_template import RoIHeadTemplate
 from ...utils import common_utils
 from ...ops.pointnet2.pointnet2_stack import pointnet2_modules as pointnet2_stack_modules
+from ...ops.pointnet2.pointnet2_stack import pointnet2_utils as pointnet2_stack_utils
 
 
-class PVRCNNHead(RoIHeadTemplate):
+class PVNet(RoIHeadTemplate):
     def __init__(self, input_channels, model_cfg, num_class=1):
         super().__init__(num_class=num_class, model_cfg=model_cfg)
         self.model_cfg = model_cfg
@@ -12,7 +13,7 @@ class PVRCNNHead(RoIHeadTemplate):
         mlps = self.model_cfg.ROI_GRID_POOL.MLPS
         for k in range(len(mlps)):
             mlps[k] = [input_channels] + mlps[k]
-
+        '''
         self.roi_grid_pool_layer = pointnet2_stack_modules.StackSAModuleMSG(
             radii=self.model_cfg.ROI_GRID_POOL.POOL_RADIUS,
             nsamples=self.model_cfg.ROI_GRID_POOL.NSAMPLE,
@@ -20,7 +21,14 @@ class PVRCNNHead(RoIHeadTemplate):
             use_xyz=True,
             pool_method=self.model_cfg.ROI_GRID_POOL.POOL_METHOD,
         )
-
+        '''
+        self.roi_grid_pool_layer = pointnet2_stack_modules.StackSAModuleMRG(
+            radii=self.model_cfg.ROI_GRID_POOL_RADIUS,
+            nsamples=self.model_cfg.ROI_GRID_POOL.NSAMPLE,
+            mlps=mlps,
+            use_xyz=True,
+            pool_method=self.model_cfg.ROI_GRID_POOL.POOL_METHOD
+        )
         GRID_SIZE = self.model_cfg.ROI_GRID_POOL.GRID_SIZE
         c_out = sum([x[-1] for x in mlps])
         pre_channel = GRID_SIZE * GRID_SIZE * GRID_SIZE * c_out
@@ -48,6 +56,7 @@ class PVRCNNHead(RoIHeadTemplate):
             fc_list=self.model_cfg.REG_FC
         )
         self.init_weights(weight_init='xavier')
+
 
     def init_weights(self, weight_init='xavier'):
         if weight_init == 'kaiming':
@@ -82,6 +91,7 @@ class PVRCNNHead(RoIHeadTemplate):
         Returns:
 
         """
+        '''
         batch_size = batch_dict['batch_size']
         rois = batch_dict['rois']
         point_coords = batch_dict['point_coords']
@@ -114,6 +124,34 @@ class PVRCNNHead(RoIHeadTemplate):
             -1, self.model_cfg.ROI_GRID_POOL.GRID_SIZE ** 3,
             pooled_features.shape[-1]
         )  # (BxN, 6x6x6, C)
+        '''
+        batch_size = batch_dict['batch_size']
+        rois = batch_dict['rois']
+        tree = batch_dict['tree']
+        ballQuery = pointnet2_stack_utils.BallQuery().apply()
+
+        #there should have a score function
+        global_roi_grid_points, local_roi_grid_points = self.get_global_grid_points_of_roi(
+            rois,
+            grid_size=self.model_cfg.ROI_GRID_POOL.GRID_SIZE
+        )# (BxN, 6x6x6, 3)
+        global_roi_grid_points = global_roi_grid_points.view(batch_size, -1, 3) # (B, Nx6x6x6, 3)
+        point_coords = tree[0]
+        xyz = point_coords[:, 1:4]
+        xyz_batch_cnt = xyz.new_zeros(batch_size).int()
+        for i in range(len(tree)):
+            point_coords = tree[i]
+            batch_idx = point_coords[:, 0]
+            for k in range(batch_size):
+                xyz_batch_cnt[k] = (batch_idx == k).sum()
+            new_xyz = global_roi_grid_points.view(-1,3)
+            new_xyz_batch_cnt = xyz.new_zeros(batch_size).int().fill_(global_roi_grid_points.shape)
+            idx = torch.cuda.IntTensor(xyz.size(0), nsample[i]).zero_()
+            ballQuery(radius[i], nsample[i], new_xyz, new_xyz_batch_cnt, xyz, xyz_batch_cnt, idx)
+            xyz = xyz[idx.view(-1,), :]
+            xyz_batch_cnt = xyz.new_zeros(batch_size).int()
+
+
         return pooled_features
 
     def get_global_grid_points_of_roi(self, rois, grid_size):

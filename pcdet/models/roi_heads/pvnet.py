@@ -1,3 +1,4 @@
+from numpy.lib.polynomial import polymul
 import torch.nn as nn
 import torch
 from .roi_head_template import RoIHeadTemplate
@@ -46,7 +47,7 @@ class PVNet(RoIHeadTemplate):
         '''
         GRID_SIZE = self.model_cfg.ROI_GRID_POOL.GRID_SIZE
         c_out = sum([x[-1] for x in mlps])
-        pre_channel = GRID_SIZE * GRID_SIZE * GRID_SIZE * c_out
+        pre_channel = int(mlps[-1][-1])
 
         shared_fc_list = []
         for k in range(0, self.model_cfg.SHARED_FC.__len__()):
@@ -116,7 +117,7 @@ class PVNet(RoIHeadTemplate):
         global_roi_grid_points, local_roi_grid_points = self.get_global_grid_points_of_roi(
             rois, grid_size=self.model_cfg.ROI_GRID_POOL.GRID_SIZE
         )  # (BxN, 6x6x6, 3)
-        global_roi_grid_points = global_roi_grid_points.view(batch_size, -1, 3)  # (B, Nx6x6x6, 3)
+        global_roi_grid_points = global_roi_grid_points.view(batch_size, -1, 3)  # (B, num_roisx6x6x6, 3)
 
         xyz = point_coords[:, 1:4]
         xyz_batch_cnt = xyz.new_zeros(batch_size).int()
@@ -124,7 +125,7 @@ class PVNet(RoIHeadTemplate):
         for k in range(batch_size):
             xyz_batch_cnt[k] = (batch_idx == k).sum()
 
-        new_xyz = global_roi_grid_points.view(-1, 3)
+        new_xyz = global_roi_grid_points.view(-1, 3) #(B x N x 6x6x6, 3)
         new_xyz_batch_cnt = xyz.new_zeros(batch_size).int().fill_(global_roi_grid_points.shape[1])
         pooled_points, pooled_features = self.roi_grid_pool_layer(
             xyz=xyz.contiguous(),
@@ -151,15 +152,20 @@ class PVNet(RoIHeadTemplate):
         else:
             vote_feat = pooled_feats[:,:,3:] # (B, N, F)
 
-        center = rois[:,:,0:3]
-        radius = rois[:,:,3:6] # (B, num_rois, ,3)
+        center = rois[:,:,0:3] # (B, num_rois, ,3)
+        radius = rois[:,:,3:6] 
         dilate = 1.1
-        radius = dilate/2 * radius.square().sum(dim=2).sqrt()
+        radius = dilate/2 * radius.square().sum(dim=2).sqrt()# (B, num_rois, 1)
         
+        pooled_points, pooled_features = self.roi_grid_pool_layer(
+            xyz = vote_xyz.view(-1, 3).contiguous(),
+            xyz_batch_cnt = vote_xyz.new_zeros(batch_size).int().fill_(vote_xyz.shape[1]).contiguous(),
+            new_xyz  = center.view(-1, 3).contiguous(),
+            new_xyz_batch_cnt = center.new_zeros(batch_size).int().fill_(center.shape[1]).contiguous(),
+            features = vote_feat.view(-1, vote_feat.size(-1)).contiguous()
+        ) # (Bxnum_rois, 3), (Bxnum_rois, C)
 
-        QueryandGroup = pointnet2_stack_utils.QueryAndGroup.apply()
-
-
+        return pooled_features
 
     def get_global_grid_points_of_roi(self, rois, grid_size):
         rois = rois.view(-1, rois.shape[-1])
@@ -199,16 +205,23 @@ class PVNet(RoIHeadTemplate):
             batch_dict['roi_labels'] = targets_dict['roi_labels']
 
         # RoI aware pooling
-        pooled_features = self.roi_grid_pool(batch_dict)  # (BxN, 6x6x6, C)
+        pooled_features = self.roi_grid_pool(batch_dict)  # (B x num_rois, C)
+        pooled_features = pooled_features.unsqueeze(-1) # (B x num_rois, C, 1)
+        shared_features = self.shared_fc_layer(pooled_features) # (B x num_rois, C, 1) -> (B x num_rois, 256, 1)
 
+        '''
         grid_size = self.model_cfg.ROI_GRID_POOL.GRID_SIZE
         batch_size_rcnn = pooled_features.shape[0]
         pooled_features = pooled_features.permute(0, 2, 1).\
             contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
 
-        shared_features = self.shared_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1))
-        rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
-        rcnn_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
+        shared_features = self.shared_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1)) 
+        #(BxN, 216xC, 1) -> (BxN, 256,1)
+        # -> (B x num_rois, 256)
+        '''
+        # (BxN, 256,1) -> (BxN, num_class, 1) -> (BxN, num_class)
+        rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B x cls, 1 or 3)
+        rcnn_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 7 x num_cls)
 
         if not self.training:
             batch_cls_preds, batch_box_preds = self.generate_predicted_boxes(

@@ -1,4 +1,4 @@
-from pcdet.ops.pointnet2.pointnet2_stack.pointnet2_utils import BallQuery
+from pcdet.ops.pointnet2.pointnet2_stack.pointnet2_utils import BallQuery, FurthestPointSampling
 import torch
 import torch.nn as nn
 from ....utils import common_utils
@@ -164,15 +164,23 @@ class VoxelSetAbstractionMRG(nn.Module):
         keypoints = torch.cat(keypoints_list, dim=0)  # (B, M, 3)
         return keypoints
 
-    def getPoint(self, batch_dict, layer):
-        batch_size = batch_dict['batch_size']
-        if 'raw_point'==layer:
+    def get_point(self, batch_dict:dict, layer:str):
+        '''
+        get coordinates from voxel
+        :return
+            xyz: 该层的点的空间坐标[K, 3]
+            xyz_batch_cnt: 当前batch每个样本包含的点的个数
+        '''
+        batch_size = batch_dict['batch_size'] # batch size: B
+
+        if 'raw_point' == layer:
             xyz = batch_dict['points'][:, 1:4]
-            xyz_batch_cnt = xyz.new_zeros(batch_size).int()
+            xyz_batch_cnt = xyz.new_zeros(batch_size).int() # (B, 1)，记录当前batch的每个样本的点的个数，返回的是[N1, N2, ...]
             batch_indices = batch_dict['points'][:, 0].long()
             for bs_idx in range(batch_size):
-                xyz_batch_cnt[bs_idx] = (batch_indices[:, 0] == bs_idx).sum()
-        elif 'x_conv' in layer:
+                xyz_batch_cnt[bs_idx] = (batch_indices[:, 0] == bs_idx).sum() # points[:,0]储存的是此点所属的样本号
+
+        elif 'conv' in layer:
             coords = batch_dict['multi_scale_3d_features'][layer].indices
             xyz = common_utils.get_voxel_centers(
                 coords[:, 1:4],
@@ -188,9 +196,73 @@ class VoxelSetAbstractionMRG(nn.Module):
         
         return xyz, xyz_batch_cnt
 
+    def get_layer_sampled_points(self, batch_dict, layer):
+
+        assert 'conv' in layer
+        coords = batch_dict['multi_scale_3d_features'][layer].indices
+        src_points = common_utils.get_voxel_centers(
+                coords[:, 1:4],
+                downsample_times=self.downsample_times_map[layer],
+                voxel_size=self.voxel_size,
+                point_cloud_range=self.point_cloud_range
+            )
+
+        batch_indices = coords[:,0].long()
+        keypoints_list = []
+        batch_size = batch_dict['batch_size']
+        idx_list = []
+
+        for bs_idx in range(batch_size):
+            bs_mask = (batch_indices == bs_idx)
+            sampled_points = src_points[bs_mask].unsqueeze(dim=0)  # (1, N, 3)
+        
+            if self.model_cfg.SAMPLE_METHOD == 'FPS':
+                cur_pt_idxs = pointnet2_stack_utils.furthest_point_sample(
+                    sampled_points[:, :, 0:3].contiguous(), self.model_cfg.NUM_KEYPOINTS
+                ).long()
+
+                idx_list.append(cur_pt_idxs)
+
+                if sampled_points.shape[1] < self.model_cfg.NUM_KEYPOINTS:
+                    empty_num = self.model_cfg.NUM_KEYPOINTS - sampled_points.shape[1]
+                    cur_pt_idxs[0, -empty_num:] = cur_pt_idxs[0, :empty_num]
+
+                keypoints = sampled_points[0][cur_pt_idxs[0]].unsqueeze(dim=0)
+
+            elif self.model_cfg.SAMPLE_METHOD == 'FastFPS':
+                raise NotImplementedError
+            else:
+                raise NotImplementedError
+
+            keypoints_list.append(keypoints)
+
+        keypoints = torch.cat(keypoints_list, dim=0)  # (B, M, 3)
+        return keypoints, idx_list
+
+    def get_features(self, batch_dict, layer, idx_list):
+        batch_size = batch_dict['batch_size']
+        if 'conv' in layer:
+            coords = batch_dict['multi_scale_3d_features'][layer].indices
+            batch_indices = coords[:,0]
+            points = coords[:, 1:4]
+        else:
+            batch_indices = batch_dict['points'][:, 0].long()
+            points = batch_dict['points'][:, 1:4]
+        feature_list = []
+        point_list = []
+        for bs_idx in range(batch_size):
+            bs_mask = (batch_indices == bs_idx)
+            sampled_features = batch_dict['multi_scale_3d_features'][layer][bs_mask, :] # (N, F)
+            sampled_features = sampled_features.unsqueeze(0) # (1, N, F)
+            sampled_points = points[bs_mask, :] # (N, 3)
+            sampled_points = sampled_points.unsqueeze(0) # (1, N, 3)
+            feature_list.append(sampled_features[idx_list[bs_idx].long(), :]) # (1, M, F)
+            point_list.append(sampled_points[idx_list[bs_idx], :]) # (1, M, 3)
+        return torch.cat(feature_list, dim=0), torch.cat(point_list, dim=0) #(B, M, F), (B, M, 3)
+
     def forward(self, batch_dict):
         """
-        Args:
+        :param
             batch_dict:
                 batch_size:
                 keypoints: (B, num_keypoints, 3)
@@ -204,7 +276,7 @@ class VoxelSetAbstractionMRG(nn.Module):
                 spatial_features: optional
                 spatial_features_stride: optional
 
-        Returns:
+        :return
             tree:(list) (5,batch_size) [conv1, conv2, conv3, conv4, raw_points]
             conv1 ()
             point_features: (N, C)
@@ -213,28 +285,48 @@ class VoxelSetAbstractionMRG(nn.Module):
         """
         multi_scale_3d_features = batch_dict['multi_scale_3d_features']
         batch_size = batch_dict['batch_size']
+
+
         radius = self.model_cfg.RADIUS # 需要在cfg中给定, [conv4->conv3, conv3->conv2, conv2->conv1, conv1->raw]
         nsample = self.model_cfg.NSAMPLE # 需要在cfg中给定, [conv4->conv3, conv3->conv2, conv2->conv1, conv1->raw]
         layers = self.model_cfg.FEATURES_SOURCE # layers = ['conv4', 'conv3', 'conv2', 'conv1', 'raw_points']
-        ballQuery = BallQuery.apply()
-        src_name = layers.pop(0)
-        xyz, xyz_batch_cnt = self.getPoint(batch_dict, src_name)
-        new_xyz, new_xyz_batch_cnt = self.getPoint(batch_dict, src_name)
-        tree = [xyz]
-        idx_shape = [xyz.size(0)]
+        nkey_pts = self.model_cfg.NUM_KEYPOINTS # keypoints number
 
-        for k, src_name in enumerate(layers):
-            new_xyz, new_xyz_batch_cnt = self.getPoint(batch_dict, src_name)
-            idx = torch.cuda.IntTensor(xyz.size(0), nsample[k]).zero_()
-            ballQuery(radius[k], nsample[k], new_xyz, new_xyz_batch_cnt, xyz, xyz_batch_cnt, idx)
-            idx_shape.append(nsample[k])
-            tree.append(idx.view(*idx_shape))
-            xyz = new_xyz[idx.view(-1,), :]
-            xyz_batch_cnt = new_xyz[idx.view(-1,)]
 
-        batch_dict['tree'] = tree
-
+        ballQuery = BallQuery.apply
         
+
+        # FPS in the last conv layer
+        src_name = layers.pop(0) # layers = ['conv3', 'conv2', 'conv1', 'raw_points']
+        xyz, idx_list = self.get_layer_sampled_points(batch_dict, src_name) # (B, M0, 3), (B, M0)
+
+        batch_dict['sampled_points'] = xyz # (B, M0, 3)
+
+        xyz = xyz.view(-1, 3) #[M0+M0+..., 3]
+        xyz_batch_cnt = nkey_pts * xyz.new_ones(batch_size).int() # [M0, M0, ...]
+
+        # gather features in the last conv layer
+        features, _ = self.get_features(self, batch_dict, src_name, idx_list) # (B, M0, F1)
+        feature_list = [features]
+
+        for k, src_name in enumerate(layers, 0):
+            new_xyz, new_xyz_batch_cnt = self.get_point(batch_dict, src_name)
+            idx = torch.cuda.IntTensor(xyz.size(0), nsample[k]).zero_() # (M0+M0+..., nsmaple)
+            ballQuery(radius[k], nsample[k], new_xyz, new_xyz_batch_cnt, xyz, xyz_batch_cnt, idx)
+            idx = idx.view(batch_size, -1) #(B, M0 x nsample)
+
+            # gather points
+            new_features, xyz = self.get_features(self, batch_dict, src_name, idx) 
+            #(B, M0 x nsample, F2), (B, M0 x nsample, 3)
+            xyz = xyz.view(-1, 3) #(B x M0 x nsample, 3)
+            xyz_batch_cnt *= nsample # [M0 x nsample, M0 x nsample, ...]
+
+            # gather features
+            feature_list.append(new_features.view(batch_size, nkey_pts, -1)) #(B, M0, :)
+
+
+        batch_dict['conv_features'] = torch.cat(feature_list, dim=2) # (B, M0, F)
+
         keypoints = torch.tensor([])
         point_features_list = []
         keys = ['raw_keypoint','x_conv1','x_conv2','x_conv3','x_conv4','bev']

@@ -86,7 +86,7 @@ class Detector3DTemplate(nn.Module):
         return map_to_bev_module, model_info_dict
 
     def build_backbone_2d(self, model_info_dict):
-        if self.model_cfg.get('BACKBONE_2D', None) is None:
+        if self.model_cfg.get('BACKBONE_2D', None) is None: 
             return None, model_info_dict
 
         backbone_2d_module = backbones_2d.__all__[self.model_cfg.BACKBONE_2D.NAME](

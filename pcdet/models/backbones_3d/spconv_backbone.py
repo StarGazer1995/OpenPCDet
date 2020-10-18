@@ -44,12 +44,18 @@ class VoxelBackBone8x(nn.Module):
             block(16, 16, 3, norm_fn=norm_fn, padding=1, indice_key='subm1'),
         )
 
+        # [1600, 1408, 41, 32]
+        self.conv1_ = block(16, 32, 1, norm_fn=norm_fn, indice_key='spconv1_', conv_type='spconv')
+
         self.conv2 = spconv.SparseSequential(
             # [1600, 1408, 41] <- [800, 704, 21]
             block(16, 32, 3, norm_fn=norm_fn, stride=2, padding=1, indice_key='spconv2', conv_type='spconv'),
             block(32, 32, 3, norm_fn=norm_fn, padding=1, indice_key='subm2'),
             block(32, 32, 3, norm_fn=norm_fn, padding=1, indice_key='subm2'),
         )
+
+        # [800, 704, 21, 64]
+        self.conv2_ = block(32, 64, 1, norm_fn=norm_fn, indice_key='spconv2_', conv_type='spconv')
 
         self.conv3 = spconv.SparseSequential(
             # [800, 704, 21] <- [400, 352, 11]
@@ -58,12 +64,18 @@ class VoxelBackBone8x(nn.Module):
             block(64, 64, 3, norm_fn=norm_fn, padding=1, indice_key='subm3'),
         )
 
+        # [400, 352, 11, 64]
+        self.conv3_ = block(64, 64, 1, norm_fn=norm_fn, indice_key='spconv3_', conv_type='spconv')
+
         self.conv4 = spconv.SparseSequential(
             # [400, 352, 11] <- [200, 176, 5]
             block(64, 64, 3, norm_fn=norm_fn, stride=2, padding=(0, 1, 1), indice_key='spconv4', conv_type='spconv'),
             block(64, 64, 3, norm_fn=norm_fn, padding=1, indice_key='subm4'),
             block(64, 64, 3, norm_fn=norm_fn, padding=1, indice_key='subm4'),
         )
+
+        # [200, 176, 5, 64]
+        self.conv4_ = block(64, 128, 1, norm_fn=norm_fn, indice_key='spconv4_', conv_type='spconv')
 
         last_pad = 0
         last_pad = self.model_cfg.get('last_pad', last_pad)
@@ -103,6 +115,11 @@ class VoxelBackBone8x(nn.Module):
         x_conv3 = self.conv3(x_conv2)
         x_conv4 = self.conv4(x_conv3)
 
+        x_conv1_ = self.conv1_(x_conv1)
+        x_conv2_ = self.conv2_(x_conv2)
+        x_conv3_ = self.conv3_(x_conv3)
+        x_conv4_ = self.conv4_(x_conv4)
+
         # for detection head
         # [200, 176, 5] -> [200, 176, 2]
         out = self.conv_out(x_conv4)
@@ -117,6 +134,10 @@ class VoxelBackBone8x(nn.Module):
                 'x_conv2': x_conv2,
                 'x_conv3': x_conv3,
                 'x_conv4': x_conv4,
+                'x_conv1_': x_conv1_,
+                'x_conv2_': x_conv2_,
+                'x_conv3_': x_conv3_,
+                'x_conv4_': x_conv4_
             }
         })
 

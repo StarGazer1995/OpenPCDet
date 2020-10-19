@@ -5,6 +5,7 @@ from .roi_head_template import RoIHeadTemplate
 from ...utils import common_utils
 from ...ops.pointnet2.pointnet2_stack import pointnet2_modules as pointnet2_stack_modules
 from ...ops.pointnet2.pointnet2_stack import pointnet2_utils as pointnet2_stack_utils
+from ...ops.roiaware_pool3d import roiaware_pool3d_utils
 
 
 class PVNet(RoIHeadTemplate):
@@ -147,6 +148,7 @@ class PVNet(RoIHeadTemplate):
         raw_feats = torch.cat([xyz, conv_features], dim=2)
         pooled_feats = self.mlps_(raw_feats) + raw_feats # (B, N, F+3)
         vote_xyz = pooled_feats[:,:,0:3] # (B, N, 3)
+
         if use_xyz:
             vote_feat = pooled_feats
         else:
@@ -165,7 +167,7 @@ class PVNet(RoIHeadTemplate):
             features = vote_feat.view(-1, vote_feat.size(-1)).contiguous()
         ) # (Bxnum_rois, 3), (Bxnum_rois, C)
 
-        return pooled_features
+        return vote_xyz, pooled_features
 
     def get_global_grid_points_of_roi(self, rois, grid_size):
         rois = rois.view(-1, rois.shape[-1])
@@ -190,6 +192,53 @@ class PVNet(RoIHeadTemplate):
                           - (local_roi_size.unsqueeze(dim=1) / 2)  # (B, 6x6x6, 3)
         return roi_grid_points
 
+    def get_loss(self, tb_dict=None):
+        tb_dict = {} if tb_dict is None else tb_dict
+        rcnn_loss = 0
+        rcnn_loss_cls, cls_tb_dict = self.get_box_cls_layer_loss(self.forward_ret_dict)
+        rcnn_loss += rcnn_loss_cls
+        tb_dict.update(cls_tb_dict)
+
+        rcnn_loss_reg, reg_tb_dict = self.get_box_reg_layer_loss(self.forward_ret_dict)
+        rcnn_loss += rcnn_loss_reg
+        tb_dict.update(reg_tb_dict)
+
+        rcnn_loss_vote_reg, vote_reg_tb_dict = self.get_vote_reg_loss(self.forward_ret_dict)
+        rcnn_loss += rcnn_loss_vote_reg
+        tb_dict.update(vote_reg_tb_dict)
+
+        tb_dict['rcnn_loss'] = rcnn_loss.item()
+
+        return rcnn_loss, tb_dict
+
+    def get_vote_reg_loss(self, forward_ret_dict):
+        loss_cfgs = self.model_cfg.LOSS_CONFIG
+        code_size = self.box_coder.code_size
+        gt_boxes = forward_ret_dict['gt_boxes'] # (B, )
+        vote_xyz = forward_ret_dict['vote_xyz'] # (B, N, 3)
+        batch_size = forward_ret_dict['batch_size']
+        loss = 0
+
+        for bs in range(batch_size):
+            vote = vote_xyz[bs, :, :]
+            vote = vote.view(-1, 3) # (N, 3)
+            gt_box = gt_boxes[bs][:, :7] # (num_gt, 7)
+            point_masks = roiaware_pool3d_utils.points_in_boxes_cpu(vote, gt_box) # (num_gt, N)
+            mask_cnter = torch.sum(point_masks, dim=0) # (N, )
+            fore_point = point_masks[:, mask_cnter!=0] # (num_gt, N1)
+            num_fore_point = fore_point.size(1) # number=N1
+            _, box_idx = torch.max(fore_point, 0) # (N1, )
+            box_xyz = gt_box[box_idx, :3] # (N1, 3)
+            vote_ = vote[box_idx, :] # (N1, 3)
+            reg_loss = (box_xyz - vote_).abs().sum(dim=1).sum(dim=0) # L1 loss
+            reg_loss /= num_fore_point
+            loss += reg_loss.item()
+
+        loss = loss * loss_cfgs.LOSS_WEIGHTS['rcnn_vote_reg_weight'] #TODO: 记得设置
+        tb_dict = {'rcnn_vote_reg_weight': loss}
+
+        return loss, tb_dict
+
     def forward(self, batch_dict):
         """
         :param input_data: input dict
@@ -205,7 +254,7 @@ class PVNet(RoIHeadTemplate):
             batch_dict['roi_labels'] = targets_dict['roi_labels']
 
         # RoI aware pooling
-        pooled_features = self.roi_grid_pool(batch_dict)  # (B x num_rois, C)
+        vote_xyz, pooled_features = self.roi_grid_pool(batch_dict)  # (B x num_rois, C)
         pooled_features = pooled_features.unsqueeze(-1) # (B x num_rois, C, 1)
         shared_features = self.shared_fc_layer(pooled_features) # (B x num_rois, C, 1) -> (B x num_rois, 256, 1)
 
@@ -233,6 +282,9 @@ class PVNet(RoIHeadTemplate):
         else:
             targets_dict['rcnn_cls'] = rcnn_cls
             targets_dict['rcnn_reg'] = rcnn_reg
+            targets_dict['vote_xyz'] = vote_xyz
+            targets_dict['gt_boxes'] = batch_dict['gt_boxes']
+            targets_dict['batch_size'] = batch_dict['batch_size']
 
             self.forward_ret_dict = targets_dict
 
